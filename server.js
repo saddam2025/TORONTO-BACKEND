@@ -9,6 +9,7 @@ dns.setServers([
 
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const connectDB = require("./config/db");
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,9 @@ app.use(
 // Core middlewares
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve the uploads directory as a static folder
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Health-check / root route
 app.get("/", (req, res) => {

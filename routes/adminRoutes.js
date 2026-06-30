@@ -4,7 +4,7 @@ const {
   approveApplication,
   rejectApplication,
 } = require('../controllers/affiliateController');
-const { updateSystemSettings, createAdmin } = require('../controllers/adminController');
+const { updateSystemSettings, createAdmin, getAnalytics } = require('../controllers/adminController');
 const { updateOrderStatus } = require('../controllers/orderController');
 const { protect, restrictTo } = require('../middlewares/authMiddleware');
 
@@ -49,5 +49,10 @@ router.post('/create-admin', protect, restrictTo('Manager'), createAdmin);
 // @desc    Update an order's status; auto-settles affiliate wallet on Delivered
 // @access  Private (Admin/Manager)
 router.put('/orders/:id/status', protect, restrictTo('Admin', 'Manager'), updateOrderStatus);
+
+// @route   GET /api/admin/analytics
+// @desc    Aggregate sales/profit analytics (Normal vs Affiliate) for a date range
+// @access  Private (Admin/Manager)
+router.get('/analytics', protect, restrictTo('Admin', 'Manager'), getAnalytics);
 
 module.exports = router;

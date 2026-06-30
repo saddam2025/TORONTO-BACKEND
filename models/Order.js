@@ -1,3 +1,4 @@
+// Order.js
 const mongoose = require('mongoose');
 
 /**
@@ -57,32 +58,30 @@ const orderSchema = new mongoose.Schema(
       min: 0,
       // Sum of (item.price * item.quantity) before any discount
     },
-    affiliateCodeUsed: {
-      type: String,
-      trim: true,
-      uppercase: true,
+    affiliateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User', // References the affiliate user who referred this order
       default: null,
-      // The AffiliateProfile.customCode applied to this order, if any
     },
-    appliedDiscountAmount: {
+    totalDiscount: {
       type: Number,
       required: true,
       default: 0,
       min: 0,
-      // Amount deducted from subtotal due to globalCustomerDiscountRate
+      // Total amount deducted from the order
     },
-    calculatedCommissionAmount: {
+    totalAffiliateCommission: {
       type: Number,
       required: true,
       default: 0,
       min: 0,
-      // Commission owed to the affiliate, based on globalAffiliateCommissionRate
+      // Total fixed commission owed to the affiliate for this order
     },
-    finalTotal: {
+    totalOrderPrice: {
       type: Number,
       required: true,
       min: 0,
-      // subtotal - appliedDiscountAmount (the actual amount charged to the customer)
+      // subtotal - totalDiscount (the actual amount charged to the customer)
     },
     status: {
       type: String,

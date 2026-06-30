@@ -1,6 +1,8 @@
 const bcrypt = require('bcryptjs');
 const SystemSettings = require('../models/SystemSettings');
 const User = require('../models/User');
+const Order = require('../models/Order');
+const Product = require('../models/Product');
 
 /**
  * @desc    Update global platform rates (customer discount % / affiliate commission %)
@@ -140,4 +142,121 @@ const createAdmin = async (req, res) => {
   }
 };
 
-module.exports = { updateSystemSettings, createAdmin };
+/**
+ * @desc    Aggregate sales/profit analytics for orders within a date range
+ * @route   GET /api/admin/analytics?startDate=...&endDate=...
+ * @access  Private (Admin/Manager)
+ *
+ * Splits orders into "Normal" (no affiliateId) vs "Affiliate" (affiliateId
+ * set) buckets and computes Net Profit per item using the PRODUCT's current
+ * baseProfitPerPiece / affiliateCommission / productDiscount fields (these
+ * live on Product, not on the Order's item snapshot, so each item's
+ * productId is looked up against a Product map built from this batch of
+ * orders):
+ *
+ *   Normal item profit    = baseProfitPerPiece × quantity
+ *   Affiliate item profit = (baseProfitPerPiece - affiliateCommission - productDiscount) × quantity
+ *
+ * Orders are filtered by createdAt (not order date fields), per spec.
+ */
+const getAnalytics = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide both startDate and endDate.',
+      });
+    }
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: 'startDate and endDate must be valid dates.',
+      });
+    }
+
+    const orders = await Order.find({
+      createdAt: { $gte: start, $lte: end },
+    })
+      .populate('customerId', 'name email')
+      .populate('affiliateId', 'name email')
+      .populate('items.productId')
+      .sort({ createdAt: -1 });
+
+    // Build a quick lookup of productId -> profit fields, in case populate
+    // didn't resolve a particular item (e.g. product was deleted).
+    const productIds = orders
+      .flatMap((order) => order.items.map((item) => item.productId))
+      .filter(Boolean)
+      .map((p) => (p._id ? p._id : p));
+
+    const products = await Product.find({ _id: { $in: productIds } }).select(
+      'baseProfitPerPiece affiliateCommission productDiscount'
+    );
+
+    const productMap = new Map(products.map((p) => [String(p._id), p]));
+
+    let totalAffiliateSales = 0;
+    let totalNormalSales = 0;
+    let affiliateNetProfit = 0;
+    let normalNetProfit = 0;
+
+    for (const order of orders) {
+      const isAffiliateOrder = !!order.affiliateId;
+
+      if (isAffiliateOrder) {
+        totalAffiliateSales += order.totalOrderPrice;
+      } else {
+        totalNormalSales += order.totalOrderPrice;
+      }
+
+      for (const item of order.items) {
+        const productRef = item.productId && item.productId._id
+          ? item.productId._id
+          : item.productId;
+        const product = productRef ? productMap.get(String(productRef)) : null;
+
+        if (!product) continue; // product deleted/missing — skip profit calc for this item
+
+        const baseProfitPerPiece = product.baseProfitPerPiece || 0;
+        const affiliateCommission = product.affiliateCommission || 0;
+        const productDiscount = product.productDiscount || 0;
+
+        if (isAffiliateOrder) {
+          affiliateNetProfit +=
+            (baseProfitPerPiece - affiliateCommission - productDiscount) * item.quantity;
+        } else {
+          normalNetProfit += baseProfitPerPiece * item.quantity;
+        }
+      }
+    }
+
+    const combinedNetProfit = affiliateNetProfit + normalNetProfit;
+
+    return res.status(200).json({
+      success: true,
+      message: 'Analytics fetched successfully.',
+      analytics: {
+        totalAffiliateSales,
+        totalNormalSales,
+        affiliateNetProfit,
+        normalNetProfit,
+        combinedNetProfit,
+      },
+      orders,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Server error while fetching analytics.',
+      error: error.message,
+    });
+  }
+};
+
+module.exports = { updateSystemSettings, createAdmin, getAnalytics };

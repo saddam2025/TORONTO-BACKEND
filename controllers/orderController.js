@@ -1,9 +1,9 @@
+// orderController.js
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
 const AffiliateProfile = require('../models/AffiliateProfile');
 const User = require('../models/User');
-const SystemSettings = require('../models/SystemSettings');
 
 /**
  * @desc    Create a new order (Affiliate Engine checkout)
@@ -12,17 +12,22 @@ const SystemSettings = require('../models/SystemSettings');
  *
  * Expected request body:
  * {
- *   "items": [ { "productId": "...", "quantity": 2 }, ... ],
- *   "affiliateCode": "NADA10"   // optional
+ * "items": [ { "productId": "...", "quantity": 2 }, ... ],
+ * "affiliateCode": "NADA10"   // optional
  * }
  *
  * Pricing logic (per spec):
- *   appliedDiscountAmount      = subtotal * globalCustomerDiscountRate
- *   finalTotal                 = subtotal - appliedDiscountAmount
- *   calculatedCommissionAmount = finalTotal * globalAffiliateCommissionRate
+ * When an affiliate code is used, for every cart item:
+ * Item Customer Discount = product.productDiscount * quantity
+ * Item Affiliate Reward  = product.affiliateCommission * quantity
  *
- * If no valid affiliateCode is supplied, discount and commission are both 0
- * and finalTotal === subtotal.
+ * totalDiscount = Sum of all Item Customer Discounts
+ * totalAffiliateCommission = Sum of all Item Affiliate Rewards
+ *
+ * totalOrderPrice = subtotal - totalDiscount
+ *
+ * If no valid affiliateCode is supplied, totalDiscount and
+ * totalAffiliateCommission are both 0 and totalOrderPrice === subtotal.
  *
  * Wrapped in a transaction: stock decrements, order creation, and the
  * affiliate's pendingBalance increment must all succeed together or not
@@ -46,11 +51,48 @@ const createOrder = async (req, res) => {
     }
 
     // ---------------------------------------------------------------
-    // 1. Resolve products, validate stock, and build a price snapshot.
-    //    We NEVER trust client-submitted prices — always re-fetch from
-    //    the Product collection so a tampered request can't undercharge.
+    // 1. Resolve the affiliate (if a code was provided) and confirm
+    //    they are a valid, ACTIVE affiliate — meaning their profile
+    //    exists AND their linked User still holds the 'Affiliate' role
+    //    (in case they were ever demoted after the profile was created).
+    // ---------------------------------------------------------------
+    let affiliateProfile = null;
+    let affiliateUser = null;
+
+    if (affiliateCode && affiliateCode.trim().length > 0) {
+      const normalizedCode = affiliateCode.trim().toUpperCase();
+
+      affiliateProfile = await AffiliateProfile.findOne({
+        customCode: normalizedCode,
+      }).session(session);
+
+      if (!affiliateProfile) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid affiliate code.',
+        });
+      }
+
+      affiliateUser = await User.findById(affiliateProfile.userId).session(session);
+
+      if (!affiliateUser || affiliateUser.role !== 'Affiliate') {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: 'This affiliate code is no longer active.',
+        });
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // 2. Resolve products, validate stock, and build a price snapshot.
+    //    We calculate fixed discounts and commissions per item during
+    //    this loop if a valid affiliate was resolved.
     // ---------------------------------------------------------------
     let subtotal = 0;
+    let totalDiscount = 0;
+    let totalAffiliateCommission = 0;
     const orderItems = [];
 
     for (const requestedItem of items) {
@@ -78,7 +120,7 @@ const createOrder = async (req, res) => {
         await session.abortTransaction();
         return res.status(400).json({
           success: false,
-          message: `Insufficient stock for "${product.name}". Available: ${product.stock}, requested: ${quantity}.`,
+          message: `Insufficient stock for "${product.nameEn}". Available: ${product.stock}, requested: ${quantity}.`,
         });
       }
 
@@ -89,74 +131,24 @@ const createOrder = async (req, res) => {
       const lineTotal = product.price * quantity;
       subtotal += lineTotal;
 
+      // Accumulate fixed discounts and commissions if an affiliate code was used
+      if (affiliateProfile) {
+        totalDiscount += (product.productDiscount || 0) * quantity;
+        totalAffiliateCommission += (product.affiliateCommission || 0) * quantity;
+      }
+
       orderItems.push({
         productId: product._id,
-        name: product.name,
+        name: product.nameEn,
         quantity,
         price: product.price,
       });
     }
 
-    // ---------------------------------------------------------------
-    // 2. Resolve the affiliate (if a code was provided) and confirm
-    //    they are a valid, ACTIVE affiliate — meaning their profile
-    //    exists AND their linked User still holds the 'Affiliate' role
-    //    (in case they were ever demoted after the profile was created).
-    // ---------------------------------------------------------------
-    let affiliateProfile = null;
-
-    if (affiliateCode && affiliateCode.trim().length > 0) {
-      const normalizedCode = affiliateCode.trim().toUpperCase();
-
-      affiliateProfile = await AffiliateProfile.findOne({
-        customCode: normalizedCode,
-      }).session(session);
-
-      if (!affiliateProfile) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid affiliate code.',
-        });
-      }
-
-      const affiliateUser = await User.findById(affiliateProfile.userId).session(session);
-
-      if (!affiliateUser || affiliateUser.role !== 'Affiliate') {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: 'This affiliate code is no longer active.',
-        });
-      }
-    }
+    const totalOrderPrice = subtotal - totalDiscount;
 
     // ---------------------------------------------------------------
-    // 3. Pull global rates and compute the financial breakdown.
-    //    Only apply discount/commission if a valid affiliate was resolved.
-    // ---------------------------------------------------------------
-    const settings = await SystemSettings.findOne().session(session);
-
-    // If no SystemSettings document exists yet, fall back to 0 for both
-    // rates rather than crashing the checkout flow.
-    const globalCustomerDiscountRate = settings?.globalCustomerDiscountRate || 0;
-    const globalAffiliateCommissionRate = settings?.globalAffiliateCommissionRate || 0;
-
-    let appliedDiscountAmount = 0;
-    let calculatedCommissionAmount = 0;
-
-    if (affiliateProfile) {
-      appliedDiscountAmount = subtotal * globalCustomerDiscountRate;
-    }
-
-    const finalTotal = subtotal - appliedDiscountAmount;
-
-    if (affiliateProfile) {
-      calculatedCommissionAmount = finalTotal * globalAffiliateCommissionRate;
-    }
-
-    // ---------------------------------------------------------------
-    // 4. Create the order.
+    // 3. Create the order.
     // ---------------------------------------------------------------
     const order = await Order.create(
       [
@@ -164,10 +156,10 @@ const createOrder = async (req, res) => {
           customerId: req.user._id,
           items: orderItems,
           subtotal,
-          affiliateCodeUsed: affiliateProfile ? affiliateProfile.customCode : null,
-          appliedDiscountAmount,
-          calculatedCommissionAmount,
-          finalTotal,
+          affiliateId: affiliateUser ? affiliateUser._id : null,
+          totalDiscount,
+          totalAffiliateCommission,
+          totalOrderPrice,
           status: 'Pending',
         },
       ],
@@ -175,12 +167,12 @@ const createOrder = async (req, res) => {
     );
 
     // ---------------------------------------------------------------
-    // 5. Credit the affiliate's pendingBalance, if applicable.
+    // 4. Credit the affiliate's pendingBalance, if applicable.
     //    Commission stays "pending" until the order is later marked
     //    Delivered (handled by a separate order-status-update flow).
     // ---------------------------------------------------------------
-    if (affiliateProfile && calculatedCommissionAmount > 0) {
-      affiliateProfile.pendingBalance += calculatedCommissionAmount;
+    if (affiliateProfile && totalAffiliateCommission > 0) {
+      affiliateProfile.pendingBalance += totalAffiliateCommission;
       await affiliateProfile.save({ session });
     }
 
@@ -211,9 +203,9 @@ const createOrder = async (req, res) => {
  * CRITICAL FINANCIAL & WALLET LOGIC:
  * When (and only when) the status transitions from something other than
  * 'Delivered' INTO 'Delivered':
- *   1. Locate the order and read its calculatedCommissionAmount.
- *   2. Locate the AffiliateProfile tied to order.affiliateCodeUsed.
- *   3. Move the commission: pendingBalance -= amount, withdrawableBalance += amount.
+ * 1. Locate the order and read its totalAffiliateCommission.
+ * 2. Locate the AffiliateProfile tied to order.affiliateId.
+ * 3. Move the commission: pendingBalance -= amount, withdrawableBalance += amount.
  *
  * Idempotency guard: the wallet transfer only fires if order.status was NOT
  * already 'Delivered' at the time of this call. This means calling this
@@ -260,9 +252,9 @@ const updateOrderStatus = async (req, res) => {
 
     let walletTransfer = null;
 
-    if (isNewlyDelivered && order.affiliateCodeUsed && order.calculatedCommissionAmount > 0) {
+    if (isNewlyDelivered && order.affiliateId && order.totalAffiliateCommission > 0) {
       const affiliateProfile = await AffiliateProfile.findOne({
-        customCode: order.affiliateCodeUsed,
+        userId: order.affiliateId,
       }).session(session);
 
       // If the affiliate profile is somehow gone (edge case — e.g. manually
@@ -270,7 +262,7 @@ const updateOrderStatus = async (req, res) => {
       // update. The order still transitions to Delivered; we just skip
       // the wallet movement and surface that in the response.
       if (affiliateProfile) {
-        const commission = order.calculatedCommissionAmount;
+        const commission = order.totalAffiliateCommission;
 
         affiliateProfile.pendingBalance = Math.max(0, affiliateProfile.pendingBalance - commission);
         affiliateProfile.withdrawableBalance += commission;
