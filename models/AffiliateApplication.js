@@ -19,6 +19,11 @@ const affiliateApplicationSchema = new mongoose.Schema(
       default: 'Pending',
       required: true,
     },
+    paymentAccountNumber: {
+      type: String,
+      required: [true, 'A payment account number is required'],
+      trim: true,
+    },
     customCodeRequested: {
       type: String,
       required: [true, 'A requested custom code is required'],
@@ -43,6 +48,7 @@ const affiliateApplicationSchema = new mongoose.Schema(
       },
     },
     preferredPaymentMethod: {
+
       type: String,
       enum: ['Vodafone Cash', 'InstaPay', 'Bank Transfer'],
       required: [true, 'Preferred payment method is required'],

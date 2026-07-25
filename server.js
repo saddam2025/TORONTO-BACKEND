@@ -1,3 +1,4 @@
+// server.js
 require('dotenv').config();
 
 const dns = require("dns");
@@ -12,26 +13,10 @@ const cors = require("cors");
 const path = require("path");
 const connectDB = require("./config/db");
 
-// ---------------------------------------------------------------------------
-// toronto Backend — Phases 1-4 Complete
-// Initializes Express, connects to MongoDB (toronto_db), and mounts:
-//   /api/auth        - registration & login
-//   /api/affiliates  - affiliate self-service (apply)
-//   /api/admin       - Manager/Admin management (applications, settings,
-//                      admin creation, order status + wallet settlement)
-//   /api/orders      - customer checkout (Affiliate Engine)
-// Product/User CRUD routes remain for a future phase.
-// ---------------------------------------------------------------------------
-
-// Connect to MongoDB before starting the server
 connectDB();
 
 const app = express();
 
-// ---------------------------------------------------------------------------
-// CORS Configuration
-// Allow requests from the React frontend
-// ---------------------------------------------------------------------------
 app.use(
   cors({
     origin: "http://localhost:5173",
@@ -39,35 +24,28 @@ app.use(
   })
 );
 
-// Core middlewares
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve the uploads directory as a static folder
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// Health-check / root route
 app.get("/", (req, res) => {
   res.status(200).json({
     success: true,
     message: "toronto API is running.",
-    phase: "Phase 4 - Management & Wallet Control Complete",
+    phase: "Phase 5 - Products & Collections Complete",
   });
 });
 
 // ---------------------------------------------------------------------------
 // Route mounting
 // ---------------------------------------------------------------------------
-app.use("/api/auth", require("./routes/authRoutes"));
-app.use("/api/affiliates", require("./routes/affiliateRoutes"));
-app.use("/api/admin", require("./routes/adminRoutes"));
-app.use("/api/orders", require("./routes/orderRoutes"));
-
-// ---------------------------------------------------------------------------
-// Future phase placeholder
-// ---------------------------------------------------------------------------
-// app.use('/api/users', require('./routes/userRoutes'));
-// app.use('/api/products', require('./routes/productRoutes'));
+app.use("/api/auth",        require("./routes/authRoutes"));
+app.use("/api/affiliates",  require("./routes/affiliateRoutes"));
+app.use("/api/admin",       require("./routes/adminRoutes"));
+app.use("/api/orders",      require("./routes/orderRoutes"));
+app.use("/api/products",    require("./routes/productRoutes"));
+app.use("/api/collections", require("./routes/collectionRoutes"));
 
 // Fallback 404 handler
 app.use((req, res) => {

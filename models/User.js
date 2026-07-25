@@ -32,6 +32,12 @@ const userSchema = new mongoose.Schema(
       default: 'Customer',
       required: true,
     },
+    status: {
+      type: String,
+      enum: ['active', 'suspended'],
+      default: 'active',
+      required: true,
+    },
   },
   {
     timestamps: { createdAt: true, updatedAt: true },

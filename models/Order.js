@@ -1,12 +1,6 @@
-// Order.js
+// backend/models/Order.js
 const mongoose = require('mongoose');
 
-/**
- * Order Item Sub-Schema
- * Embedded document capturing a snapshot of each purchased product
- * at the time of order (price is captured here, not just referenced,
- * so historical orders remain accurate even if Product.price changes later).
- */
 const orderItemSchema = new mongoose.Schema(
   {
     productId: {
@@ -16,7 +10,7 @@ const orderItemSchema = new mongoose.Schema(
     },
     name: {
       type: String,
-      required: true, // snapshot of product name at purchase time
+      required: true,
     },
     quantity: {
       type: Number,
@@ -25,18 +19,24 @@ const orderItemSchema = new mongoose.Schema(
     },
     price: {
       type: Number,
-      required: true, // snapshot of unit price at purchase time
+      required: true,
       min: 0,
+    },
+    // Previously missing entirely — the customer's chosen size/color were
+    // captured in the cart but never made it past Checkout.jsx into the
+    // order payload, so there was nowhere on the model to even store them.
+    size: {
+      type: String,
+      default: null,
+    },
+    color: {
+      type: String,
+      default: null,
     },
   },
   { _id: false }
 );
 
-/**
- * Order Schema
- * Represents a customer purchase, including the financial breakdown
- * produced by the Affiliate Engine (discount applied + commission generated).
- */
 const orderSchema = new mongoose.Schema(
   {
     customerId: {
@@ -56,11 +56,10 @@ const orderSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0,
-      // Sum of (item.price * item.quantity) before any discount
     },
     affiliateId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User', // References the affiliate user who referred this order
+      ref: 'User',
       default: null,
     },
     totalDiscount: {
@@ -68,26 +67,52 @@ const orderSchema = new mongoose.Schema(
       required: true,
       default: 0,
       min: 0,
-      // Total amount deducted from the order
     },
     totalAffiliateCommission: {
       type: Number,
       required: true,
       default: 0,
       min: 0,
-      // Total fixed commission owed to the affiliate for this order
     },
     totalOrderPrice: {
       type: Number,
       required: true,
       min: 0,
-      // subtotal - totalDiscount (the actual amount charged to the customer)
     },
     status: {
       type: String,
-      enum: ['Pending', 'Shipped', 'Delivered'],
+      enum: ['Pending', 'Shipped', 'Delivered', 'Cancelled'],
       default: 'Pending',
       required: true,
+    },
+    paymentMethod: {
+      type: String,
+      enum: ['COD', 'Card'],
+      default: 'COD',
+    },
+    paymentStatus: {
+      type: String,
+      enum: ['Pending', 'Paid', 'Failed'],
+      default: 'Pending',
+    },
+    paymobOrderId: {
+      type: Number,
+      default: null,
+    },
+    paymobTransactionId: {
+      type: String,
+      default: null,
+    },
+    // Also previously missing entirely. Checkout.jsx collects name/address/
+    // phone but the COD flow (createOrder) never read shippingDetails from
+    // the request body at all, and the Paymob flow only used it to build
+    // Paymob's billing_data — it was never actually saved onto the Order
+    // document either.
+    shippingDetails: {
+      name: { type: String, default: null },
+      phone: { type: String, default: null },
+      address: { type: String, default: null },
+      city: { type: String, default: null },
     },
   },
   {

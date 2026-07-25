@@ -1,3 +1,4 @@
+// authController.js
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const generateToken = require('../utils/generateToken');
@@ -58,12 +59,16 @@ const register = async (req, res) => {
 
     const token = generateToken(user._id, user.role);
 
+    // FIX: return `name` (matching the User schema field and what the
+    // frontend's Navbar/UserProfile read via user?.name) instead of
+    // `fullName`, and include `id` so the user object is consistent
+    // with what login() returns.
     return res.status(201).json({
       success: true,
       token,
       user: {
         id: user._id,
-        fullName: user.name,
+        name: user.name,
         email: user.email,
         role: user.role,
       },
@@ -116,12 +121,17 @@ const login = async (req, res) => {
 
     const token = generateToken(user._id, user.role);
 
+    // FIX: return `id` and `name` (was missing `id`, and used `fullName`
+    // instead of `name`) so the stored user object matches what register()
+    // returns and what the Navbar/UserProfile components read.
     return res.status(200).json({
+      success: true,
       token,
       user: {
-        role: user.role,
-        fullName: user.name,
+        id: user._id,
+        name: user.name,
         email: user.email,
+        role: user.role,
       },
     });
   } catch (error) {
@@ -132,5 +142,45 @@ const login = async (req, res) => {
     });
   }
 };
+// authController.js — add this function, keep register/login as-is
+/**
+ * @desc    Get the currently authenticated user's fresh data (name, email,
+ *          role, status) directly from the database.
+ * @route   GET /api/auth/me
+ * @access  Private
+ *
+ * Added so the frontend can re-sync a user's role after it changes
+ * server-side (e.g. Customer -> Affiliate on approval) without requiring
+ * them to log out and back in — the JWT itself only encodes userId, but
+ * the locally cached `user` object in AuthContext was never refreshed
+ * after login, so a promoted user's UI kept treating them as their old role.
+ */
+const getMe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
 
-module.exports = { register, login };
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Server error while fetching current user.',
+      error: error.message,
+    });
+  }
+};
+
+module.exports = { register, login, getMe };
+

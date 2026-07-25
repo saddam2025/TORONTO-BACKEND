@@ -1,15 +1,15 @@
 // collectionRoutes.js
 const express = require('express');
 const collectionController = require('../controllers/collectionController');
-const upload = require('../middleware/upload');
-const { protect, restrictTo } = require('../middlewares/authMiddleware'); // اعدل اسم الميدل وير حسب مشروعك
+const upload = require('../middlewares/upload');
+const { protect, restrictTo } = require('../middlewares/authMiddleware');
 
 const router = express.Router();
 
-// أي حد يقدر يشوف المجموعات
 router.get('/', collectionController.getCollections);
 
-// إنشاء مجموعة جديدة — متاح للـ Manager والـ Admin (الاتنين)
+router.get('/:id', collectionController.getCollection);
+
 router.post(
   '/',
   protect,
@@ -18,7 +18,14 @@ router.post(
   collectionController.createCollection
 );
 
-// حذف مجموعة — متاح للـ Manager والـ Admin (الاتنين)
+router.put(
+  '/:id',
+  protect,
+  restrictTo('Manager', 'Admin'),
+  upload.single('image'),
+  collectionController.updateCollection
+);
+
 router.delete(
   '/:id',
   protect,

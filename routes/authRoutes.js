@@ -1,16 +1,17 @@
+// authRoutes.js
 const express = require('express');
-const { register, login } = require('../controllers/authController');
+const { register, login, getMe } = require('../controllers/authController');
+const { protect } = require('../middlewares/authMiddleware');
 
 const router = express.Router();
 
-// @route   POST /api/auth/register
-// @desc    Register a new user (auto-promoted to Manager if email matches MANAGER_EMAIL)
-// @access  Public
 router.post('/register', register);
-
-// @route   POST /api/auth/login
-// @desc    Authenticate user and return JWT
-// @access  Public
 router.post('/login', login);
+
+// @route   GET /api/auth/me
+// @desc    Fetch the current user's up-to-date profile (fixes stale role
+//          after a promotion like Customer -> Affiliate)
+// @access  Private
+router.get('/me', protect, getMe);
 
 module.exports = router;
