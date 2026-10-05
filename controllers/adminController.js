@@ -1,3 +1,4 @@
+const sendControllerError = require('../utils/controllerError');
 // adminController.js — full file, includes the getAllUsers fix + new getUserById + the getAnalytics fix above
 const bcrypt = require('bcryptjs');
 const SystemSettings = require('../models/SystemSettings');
@@ -59,11 +60,7 @@ const updateSystemSettings = async (req, res) => {
       settings,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while updating system settings.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -109,11 +106,7 @@ const createAdmin = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while creating admin account.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -177,11 +170,7 @@ const getAllUsers = async (req, res) => {
       users: enrichedUsers,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching users.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -227,11 +216,7 @@ const getUserById = async (req, res) => {
       orderCount: orders.length,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching user details.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -277,11 +262,7 @@ const updateUserStatus = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while updating user status.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -359,6 +340,18 @@ const getAnalytics = async (req, res) => {
     }
 
     const combinedNetProfit = affiliateNetProfit + normalNetProfit;
+    const promotionOrders = orders.filter((order) => order.appliedPromotions?.length).length;
+    const totalPromotionDiscount = orders.reduce((sum, order) => sum + Number(order.promotionDiscount || 0), 0);
+    const promotionTotals = new Map();
+    for (const order of orders) {
+      for (const applied of order.appliedPromotions || []) {
+        const current = promotionTotals.get(applied.name) || { name: applied.name, uses: 0, discount: 0 };
+        current.uses += 1;
+        current.discount += Number(applied.discountAmount || 0);
+        promotionTotals.set(applied.name, current);
+      }
+    }
+    const topPromotions = [...promotionTotals.values()].sort((a, b) => b.uses - a.uses || b.discount - a.discount).slice(0, 5);
 
     return res.status(200).json({
       success: true,
@@ -369,15 +362,14 @@ const getAnalytics = async (req, res) => {
         affiliateNetProfit,
         normalNetProfit,
         combinedNetProfit,
+        promotionOrders,
+        totalPromotionDiscount,
+        topPromotions,
       },
       orders,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching analytics.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 

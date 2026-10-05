@@ -33,6 +33,14 @@ const orderItemSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    freeItems: [{
+      productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+      name: { type: String, required: true },
+      price: { type: Number, min: 0, required: true },
+      size: { type: String, default: null },
+      color: { type: String, default: null },
+      quantity: { type: Number, min: 1, required: true },
+    }],
   },
   { _id: false }
 );
@@ -68,6 +76,20 @@ const orderSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    promotionDiscount: { type: Number, default: 0, min: 0 },
+    affiliateDiscount: { type: Number, default: 0, min: 0 },
+    promotionPricingVersion: { type: Number, default: 0 },
+    appliedPromotions: [{
+      promotionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
+      name: { type: String, required: true },
+      type: { type: String, required: true },
+      ruleDescription: { type: String, required: true },
+      tiers: { type: [mongoose.Schema.Types.Mixed], default: [] },
+      stackable: { type: Boolean, default: false },
+      freeItems: { type: [mongoose.Schema.Types.Mixed], default: [] },
+      discountAmount: { type: Number, min: 0, default: 0 },
+    }],
     totalAffiliateCommission: {
       type: Number,
       required: true,
@@ -79,6 +101,7 @@ const orderSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    shippingCost: { type: Number, default: 0, min: 0 },
     status: {
       type: String,
       enum: ['Pending', 'Shipped', 'Delivered', 'Cancelled'],

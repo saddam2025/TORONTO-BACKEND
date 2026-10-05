@@ -2,7 +2,47 @@
 // Fix: Bug 1 — return 200 with empty array instead of 404 when no products match filters.
 const fs = require('fs');
 const path = require('path');
+const mongoose = require('mongoose');
 const Product = require('../models/Product');
+const Collection = require('../models/Collection');
+const Promotion = require('../models/Promotion');
+const sendControllerError = require('../utils/controllerError');
+const { isPromotionAvailable, promotionHint } = require('../utils/promotionPricing');
+
+function productHasStock(product) {
+  return Number(product.stock || 0) > 0
+    || [...(product.stockBySize?.values?.() || [])].some((value) => Number(value) > 0)
+    || [...(product.stockByVariant?.values?.() || [])].some((value) => Number(value) > 0);
+}
+
+async function addActivePromotionSummaries(products) {
+  if (!products.length) return products;
+  const ids = products.map((product) => product._id);
+  const now = new Date();
+  const promotions = await Promotion.find({ product: { $in: ids }, isActive: true, startsAt: { $lte: now }, $or: [{ endsAt: null }, { endsAt: { $gt: now } }] }).sort({ priority: -1, startsAt: -1 });
+  const grouped = new Map();
+  for (const promotion of promotions) {
+    const id = String(promotion.product);
+    if (!grouped.has(id)) grouped.set(id, []);
+    grouped.get(id).push({
+      _id: promotion._id,
+      name: promotion.name,
+      description: promotion.description,
+      type: promotion.type,
+      tiers: promotion.tiers,
+      stackable: promotion.stackable,
+      priority: promotion.priority,
+      startsAt: promotion.startsAt,
+      endsAt: promotion.endsAt,
+      hint: promotionHint(promotion.toObject()),
+    });
+  }
+  return products.map((product) => {
+    const availablePromotions = productHasStock(product) ? grouped.get(String(product._id)) || [] : [];
+    const value = product.toObject ? product.toObject() : product;
+    return { ...value, promotions: availablePromotions, hasActivePromotion: availablePromotions.length > 0, promotionHint: availablePromotions[0]?.hint || null };
+  });
+}
 
 function parseJsonField(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -52,10 +92,13 @@ exports.getProducts = async (req, res) => {
     if (sort === 'priceLow') sortOptions = { price: 1 };
     if (sort === 'priceHigh') sortOptions = { price: -1 };
 
-    const [products, total] = await Promise.all([
-      Product.find(query).sort(sortOptions).skip(skip).limit(limitNum),
+    const [allProducts, total] = await Promise.all([
+      Product.find(query).sort(sortOptions),
       Product.countDocuments(query),
     ]);
+    const prioritized = (await addActivePromotionSummaries(allProducts))
+      .sort((a, b) => Number(b.hasActivePromotion) - Number(a.hasActivePromotion));
+    const products = prioritized.slice(skip, skip + limitNum);
 
     // FIX Bug 1: was returning 404 for empty results. 404 means route not found,
     // not "no products match". Return 200 with an empty array so callers can
@@ -69,16 +112,13 @@ exports.getProducts = async (req, res) => {
       data: { products },
     });
   } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
 exports.getProduct = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
+    let product = await Product.findById(req.params.id);
 
     if (!product) {
       return res.status(404).json({
@@ -87,15 +127,14 @@ exports.getProduct = async (req, res) => {
       });
     }
 
+    [product] = await addActivePromotionSummaries([product]);
+
     res.status(200).json({
       status: 'success',
       data: { product },
     });
   } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -117,6 +156,7 @@ exports.createProduct = async (req, res) => {
     const colors = parseJsonField(req.body.colors, []);
     const sizes = parseJsonField(req.body.sizes, []);
     const stockBySize = parseJsonField(req.body.stockBySize, {});
+    const stockByVariant = parseJsonField(req.body.stockByVariant, {});
     const parsedCollections = parseJsonField(collections, []);
 
     const imageUrls = req.files.map((file) => `/uploads/${file.filename}`);
@@ -125,7 +165,7 @@ exports.createProduct = async (req, res) => {
       nameEn, nameAr, descEn, descAr, category,
       price: Number(price) || 0,
       compareAtPrice: compareAtPrice ? Number(compareAtPrice) : null,
-      imageUrls, colors, sizes, stockBySize,
+      imageUrls, colors, sizes, stockBySize, stockByVariant,
       stock: Number(stock) || 0,
       baseProfitPerPiece: Number(baseProfitPerPiece) || 0,
       affiliateCommission: Number(affiliateCommission) || 0,
@@ -143,10 +183,7 @@ exports.createProduct = async (req, res) => {
     if (req.files && req.files.length > 0) {
       req.files.forEach((file) => fs.unlink(file.path, () => {}));
     }
-    res.status(400).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -187,6 +224,7 @@ exports.updateProduct = async (req, res) => {
     if (req.body.colors !== undefined) product.colors = parseJsonField(req.body.colors, product.colors);
     if (req.body.sizes !== undefined) product.sizes = parseJsonField(req.body.sizes, product.sizes);
     if (req.body.stockBySize !== undefined) product.stockBySize = parseJsonField(req.body.stockBySize, product.stockBySize);
+    if (req.body.stockByVariant !== undefined) product.stockByVariant = parseJsonField(req.body.stockByVariant, product.stockByVariant);
     if (collections !== undefined) product.collections = parseJsonField(collections, product.collections);
 
     if (req.files && req.files.length > 0) {
@@ -211,23 +249,28 @@ exports.updateProduct = async (req, res) => {
     if (req.files && req.files.length > 0) {
       req.files.forEach((file) => fs.unlink(file.path, () => {}));
     }
-    res.status(400).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
 exports.deleteProduct = async (req, res) => {
+  const session = await mongoose.startSession();
   try {
-    const product = await Product.findByIdAndDelete(req.params.id);
+    session.startTransaction();
+    const product = await Product.findById(req.params.id).session(session);
 
     if (!product) {
+      await session.abortTransaction();
       return res.status(404).json({
         status: 'error',
         message: 'Product not found.',
       });
     }
+
+    await Collection.updateMany({ products: product._id }, { $pull: { products: product._id } }, { session });
+    await Promotion.updateMany({ product: product._id }, { $set: { isActive: false } }, { session });
+    await product.deleteOne({ session });
+    await session.commitTransaction();
 
     if (product.imageUrls && product.imageUrls.length > 0) {
       product.imageUrls.forEach((url) => {
@@ -243,9 +286,9 @@ exports.deleteProduct = async (req, res) => {
       message: 'Product deleted.',
     });
   } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
+    await session.abortTransaction();
+    return sendControllerError(res, error);
+  } finally {
+    session.endSession();
   }
 };

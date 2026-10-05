@@ -1,3 +1,4 @@
+const sendControllerError = require('../utils/controllerError');
 // authController.js
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
@@ -74,11 +75,7 @@ const register = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: "Server error during registration.",
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 /**
@@ -110,6 +107,10 @@ const login = async (req, res) => {
       });
     }
 
+    if (user.status === 'suspended') {
+      return res.status(403).json({ success: false, message: 'This account is suspended. Contact support for assistance.' });
+    }
+
     const isPasswordMatch = await bcrypt.compare(password, user.password);
 
     if (!isPasswordMatch) {
@@ -135,11 +136,7 @@ const login = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error during login.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 // authController.js — add this function, keep register/login as-is
@@ -174,13 +171,8 @@ const getMe = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching current user.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
 module.exports = { register, login, getMe };
-

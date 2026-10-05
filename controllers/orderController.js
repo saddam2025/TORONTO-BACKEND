@@ -5,12 +5,154 @@ const Order = require('../models/Order');
 const Product = require('../models/Product');
 const AffiliateProfile = require('../models/AffiliateProfile');
 const User = require('../models/User');
+const Promotion = require('../models/Promotion');
+const sendControllerError = require('../utils/controllerError');
+const { calculatePromotionPricing, roundMoney } = require('../utils/promotionPricing');
 
 const PAYMOB_BASE_URL = process.env.PAYMOB_BASE_URL || 'https://accept.paymob.com/api';
 const PAYMOB_API_KEY = process.env.PAYMOB_API_KEY;
 const PAYMOB_INTEGRATION_ID_CARD = process.env.PAYMOB_INTEGRATION_ID_CARD;
 const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID;
 const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET;
+const variantStockKey = (size, color) => `${size || '*'}::${String(color || '*').trim().toLowerCase()}`;
+
+const reserveProductStock = (product, requestedItem, quantity) => {
+  if (product.sizes.length && (!requestedItem.size || !product.sizes.includes(requestedItem.size))) {
+    return `Please choose a valid size for "${product.nameEn}".`;
+  }
+  if (product.colors.length && (!requestedItem.color || !product.colors.some((color) => String(color).toLowerCase() === String(requestedItem.color).toLowerCase()))) {
+    return `Please choose a valid color for "${product.nameEn}".`;
+  }
+  if (product.stockByVariant instanceof Map && product.stockByVariant.size > 0) {
+    const key = variantStockKey(requestedItem.size, requestedItem.color);
+    const available = Number(product.stockByVariant.get(key) || 0);
+    if (available < quantity) return `Insufficient stock for "${product.nameEn}"${requestedItem.size ? ` in size ${requestedItem.size}` : ''}${requestedItem.color ? ` in color ${requestedItem.color}` : ''}. Available: ${available}, requested: ${quantity}.`;
+    product.stockByVariant.set(key, available - quantity);
+    if (requestedItem.size && product.stockBySize instanceof Map && product.stockBySize.has(requestedItem.size)) {
+      product.stockBySize.set(requestedItem.size, Math.max(0, Number(product.stockBySize.get(requestedItem.size) || 0) - quantity));
+    }
+  } else if (product.stockBySize instanceof Map && product.stockBySize.size > 0) {
+    const available = Number(product.stockBySize.get(requestedItem.size) || 0);
+    if (available < quantity) {
+      return `Insufficient stock for "${product.nameEn}" in size ${requestedItem.size}. Available: ${available}, requested: ${quantity}.`;
+    }
+    product.stockBySize.set(requestedItem.size, available - quantity);
+  } else if (product.stock < quantity) {
+    return `Insufficient stock for "${product.nameEn}". Available: ${product.stock}, requested: ${quantity}.`;
+  }
+  product.stock -= quantity;
+  return null;
+};
+
+const restoreCancelledOrder = async (order, session) => {
+  for (const item of order.items) {
+    const product = await Product.findById(item.productId).session(session);
+    if (!product) continue;
+    const stockEntries = [{ size: item.size, quantity: item.quantity }, ...(item.freeItems || [])];
+    for (const entry of stockEntries) {
+      product.stock += entry.quantity;
+      if (product.stockByVariant instanceof Map && product.stockByVariant.size > 0) {
+        const key = variantStockKey(entry.size, entry.color);
+        product.stockByVariant.set(key, Number(product.stockByVariant.get(key) || 0) + entry.quantity);
+        if (entry.size && product.stockBySize instanceof Map && product.stockBySize.has(entry.size)) {
+          product.stockBySize.set(entry.size, Number(product.stockBySize.get(entry.size) || 0) + entry.quantity);
+        }
+      } else if (entry.size && product.stockBySize instanceof Map && product.stockBySize.has(entry.size)) {
+        product.stockBySize.set(entry.size, Number(product.stockBySize.get(entry.size) || 0) + entry.quantity);
+      }
+    }
+    await product.save({ session });
+  }
+  if (order.affiliateId && order.totalAffiliateCommission > 0) {
+    const profile = await AffiliateProfile.findOne({ userId: order.affiliateId }).session(session);
+    if (profile) {
+      profile.pendingBalance = Math.max(0, profile.pendingBalance - order.totalAffiliateCommission);
+      await profile.save({ session });
+    }
+  }
+};
+
+async function priceAndReserveCart(items, session, { reserve = true } = {}) {
+  if (!Array.isArray(items) || !items.length) throw Object.assign(new Error('Order must include at least one item.'), { statusCode: 400 });
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index] || {};
+    if (!mongoose.Types.ObjectId.isValid(item.productId) || !Number.isInteger(Number(item.quantity)) || Number(item.quantity) < 1) {
+      throw Object.assign(new Error(`Item at index ${index} requires a valid productId and a positive integer quantity.`), { statusCode: 400 });
+    }
+  }
+  const productIds = [...new Set(items.map((item) => String(item.productId)))];
+  let productQuery = Product.find({ _id: { $in: productIds } });
+  if (session) productQuery = productQuery.session(session);
+  const products = await productQuery;
+  const productMap = new Map(products.map((product) => [String(product._id), product]));
+  const now = new Date();
+  let promotionQuery = Promotion.find({ product: { $in: productIds }, isActive: true, startsAt: { $lte: now }, $or: [{ endsAt: null }, { endsAt: { $gt: now } }] });
+  if (session) promotionQuery = promotionQuery.session(session);
+  const promotions = await promotionQuery;
+  const pricing = calculatePromotionPricing({ items, products: productMap, promotions, now });
+  if (pricing.totalOrderPrice < 0) throw Object.assign(new Error('Order total cannot be negative.'), { statusCode: 400 });
+
+  const inventoryMap = reserve ? productMap : new Map(products.map((product) => [String(product._id), {
+    ...(product.toObject ? product.toObject() : product),
+    stockBySize: new Map(product.stockBySize || []),
+    stockByVariant: new Map(product.stockByVariant || []),
+  }]));
+  for (const item of pricing.items) {
+      const product = inventoryMap.get(String(item.productId));
+      const stockError = reserveProductStock(product, item, item.quantity);
+      if (stockError) throw Object.assign(new Error(stockError), { statusCode: 400 });
+      for (const freeItem of item.freeItems || []) {
+        const freeStockError = reserveProductStock(product, freeItem, freeItem.quantity);
+        if (freeStockError) throw Object.assign(new Error(`Free item unavailable: ${freeStockError}`), { statusCode: 400 });
+      }
+  }
+  if (reserve) {
+    await Promise.all(products.map((product) => product.save(session ? { session } : undefined)));
+  }
+  pricing.productTotals = pricing.productTotals.map((line) => ({ ...line, product: productMap.get(String(line.productId)) }));
+  return pricing;
+}
+
+const affiliateDiscountFor = (pricing, affiliateProfile) => {
+  if (!affiliateProfile) return 0;
+  return roundMoney(pricing.productTotals.reduce((sum, line) => sum + Math.min(Number(line.product.productDiscount || 0) * line.quantity, line.paidTotal), 0));
+};
+
+const previewOrderPricing = async (req, res) => {
+  try {
+    const pricing = await priceAndReserveCart(req.body.items, null, { reserve: false });
+    const { affiliateCode } = req.body;
+    let affiliateProfile = null;
+    if (affiliateCode) {
+      affiliateProfile = await AffiliateProfile.findOne({ customCode: String(affiliateCode).trim().toUpperCase() });
+      if (!affiliateProfile) return res.status(400).json({ success: false, message: 'Invalid affiliate code.' });
+      const affiliateUser = await User.findById(affiliateProfile.userId);
+      if (!affiliateUser || affiliateUser.role !== 'Affiliate' || affiliateUser.status === 'suspended') return res.status(400).json({ success: false, message: 'This affiliate code is no longer active.' });
+      if (req.user?._id && String(affiliateProfile.userId) === String(req.user._id)) return res.status(400).json({ success: false, message: 'You cannot use your own affiliate code.' });
+    }
+    const affiliateDiscount = affiliateDiscountFor(pricing, affiliateProfile);
+    const shippingCost = pricing.paidSubtotal >= 6000 ? 0 : 100;
+    return res.json({ success: true, pricing: {
+      ...pricing,
+      affiliateDiscount,
+      totalDiscount: roundMoney(pricing.totalDiscount + affiliateDiscount),
+      totalOrderPrice: roundMoney(Math.max(0, pricing.totalOrderPrice - affiliateDiscount) + shippingCost),
+      shippingCost,
+      promotionsApplied: pricing.appliedPromotions.length > 0,
+    } });
+  } catch (error) { return sendControllerError(res, error); }
+};
+
+const affiliateCommissionFor = (pricing, discount) => {
+  if (!discount) return 0;
+  const byProduct = pricing.productTotals.map((line) => {
+    const lineAffiliateDiscount = Math.min(Number(line.product.productDiscount || 0) * line.quantity, line.paidTotal);
+    const afterDiscount = Math.max(0, line.paidTotal - lineAffiliateDiscount);
+    const ratio = line.paidSubtotal > 0 ? afterDiscount / line.paidSubtotal : 0;
+    return Number(line.product.affiliateCommission || 0) * line.quantity * ratio;
+  });
+  return roundMoney(byProduct.reduce((sum, value) => sum + value, 0));
+};
 
 /**
  * @desc    Create a new order (Cash on Delivery / general checkout)
@@ -63,73 +205,32 @@ const createOrder = async (req, res) => {
           message: 'This affiliate code is no longer active.',
         });
       }
+      if (affiliateUser._id.equals(req.user._id)) {
+        await session.abortTransaction();
+        return res.status(400).json({ success: false, message: 'You cannot use your own affiliate code.' });
+      }
     }
 
-    let subtotal = 0;
-    let totalDiscount = 0;
-    let totalAffiliateCommission = 0;
-    const orderItems = [];
-
-    for (let i = 0; i < items.length; i += 1) {
-      const requestedItem = items[i] || {};
-      const productId = requestedItem.productId;
-      const quantity = Number(requestedItem.quantity);
-
-      if (!productId || !mongoose.Types.ObjectId.isValid(productId) || !Number.isFinite(quantity) || quantity < 1) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Item at index ${i} requires a valid productId and a quantity of at least 1.`,
-        });
-      }
-
-      const product = await Product.findById(productId).session(session);
-
-      if (!product) {
-        await session.abortTransaction();
-        return res.status(404).json({ success: false, message: `Product not found: ${productId}` });
-      }
-
-      if (product.stock < quantity) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for "${product.nameEn}". Available: ${product.stock}, requested: ${quantity}.`,
-        });
-      }
-
-      product.stock -= quantity;
-      await product.save({ session });
-
-      const lineTotal = product.price * quantity;
-      subtotal += lineTotal;
-
-      if (affiliateProfile) {
-        totalDiscount += (product.productDiscount || 0) * quantity;
-        totalAffiliateCommission += (product.affiliateCommission || 0) * quantity;
-      }
-
-      orderItems.push({
-        productId: product._id,
-        name: product.nameEn,
-        quantity,
-        price: product.price,
-        // FIX: now actually captured from the request instead of dropped.
-        size: requestedItem.size || null,
-        color: requestedItem.color || null,
-      });
-    }
-
-    const totalOrderPrice = subtotal - totalDiscount;
+    const pricing = await priceAndReserveCart(items, session);
+    const affiliateDiscount = affiliateDiscountFor(pricing, affiliateProfile);
+    const shippingCost = pricing.paidSubtotal >= 6000 ? 0 : 100;
+    const totalDiscount = roundMoney(pricing.totalDiscount + affiliateDiscount);
+    const totalAffiliateCommission = affiliateCommissionFor(pricing, affiliateProfile);
+    const totalOrderPrice = roundMoney(Math.max(0, pricing.totalOrderPrice - affiliateDiscount) + shippingCost);
 
     const order = await Order.create(
       [
         {
           customerId: req.user._id,
-          items: orderItems,
-          subtotal,
+          items: pricing.items,
+          subtotal: pricing.subtotal,
           affiliateId: affiliateUser ? affiliateUser._id : null,
           totalDiscount,
+          promotionDiscount: pricing.totalDiscount,
+          affiliateDiscount,
+          shippingCost,
+          promotionPricingVersion: 1,
+          appliedPromotions: pricing.appliedPromotions,
           totalAffiliateCommission,
           totalOrderPrice,
           status: 'Pending',
@@ -161,11 +262,7 @@ const createOrder = async (req, res) => {
     });
   } catch (error) {
     await session.abortTransaction();
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while creating order.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   } finally {
     session.endSession();
   }
@@ -176,17 +273,43 @@ const getMyOrders = async (req, res) => {
     const orders = await Order.find({ customerId: req.user._id }).sort({ createdAt: -1 });
     return res.status(200).json({ success: true, results: orders.length, orders });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching your orders.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
+  }
+};
+
+const cancelMyOrder = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Invalid order id.' });
+    }
+    const order = await Order.findById(req.params.id).session(session);
+    if (!order || !order.customerId.equals(req.user._id)) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+    if (order.status !== 'Pending') {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Only pending orders can be cancelled.' });
+    }
+    await restoreCancelledOrder(order, session);
+    order.status = 'Cancelled';
+    await order.save({ session });
+    await session.commitTransaction();
+    return res.status(200).json({ success: true, message: 'Order cancelled.', order });
+  } catch (error) {
+    await session.abortTransaction();
+    return sendControllerError(res, error);
+  } finally {
+    session.endSession();
   }
 };
 
 const getOrders = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, withPromotions } = req.query;
     const allowedStatuses = ['Pending', 'Shipped', 'Delivered', 'Cancelled'];
 
     const filter = {};
@@ -199,6 +322,7 @@ const getOrders = async (req, res) => {
       }
       filter.status = status;
     }
+    if (withPromotions === 'true') filter['appliedPromotions.0'] = { $exists: true };
 
     const orders = await Order.find(filter)
       .populate('customerId', 'name email')
@@ -207,11 +331,7 @@ const getOrders = async (req, res) => {
 
     return res.status(200).json({ success: true, results: orders.length, orders });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching orders.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -239,15 +359,26 @@ const updateOrderStatus = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Order not found.' });
     }
 
-    const isNewlyDelivered = order.status !== 'Delivered' && status === 'Delivered';
+    const nextStatuses = {
+      Pending: ['Shipped', 'Cancelled'],
+      Shipped: ['Delivered', 'Cancelled'],
+      Delivered: [],
+      Cancelled: [],
+    };
+    if (!nextStatuses[order.status]?.includes(status)) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: `Order cannot move from '${order.status}' to '${status}'.` });
+    }
     const previousStatus = order.status;
+
+    if (status === 'Cancelled') await restoreCancelledOrder(order, session);
 
     order.status = status;
     await order.save({ session });
 
     let walletTransfer = null;
 
-    if (isNewlyDelivered && order.affiliateId && order.totalAffiliateCommission > 0) {
+    if (status === 'Delivered' && order.affiliateId && order.totalAffiliateCommission > 0) {
       const affiliateProfile = await AffiliateProfile.findOne({ userId: order.affiliateId }).session(session);
 
       if (affiliateProfile) {
@@ -276,11 +407,7 @@ const updateOrderStatus = async (req, res) => {
     });
   } catch (error) {
     await session.abortTransaction();
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while updating order status.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   } finally {
     session.endSession();
   }
@@ -408,70 +535,18 @@ const initiatePaymobPayment = async (req, res) => {
         await session.abortTransaction();
         return res.status(400).json({ success: false, message: 'This affiliate code is no longer active.' });
       }
+      if (affiliateUser._id.equals(req.user._id)) {
+        await session.abortTransaction();
+        return res.status(400).json({ success: false, message: 'You cannot use your own affiliate code.' });
+      }
     }
 
-    let subtotal = 0;
-    let totalDiscount = 0;
-    let totalAffiliateCommission = 0;
-    const orderItems = [];
-    const paymobItemLines = [];
-
-    for (let i = 0; i < items.length; i += 1) {
-      const requestedItem = items[i] || {};
-      const productId = requestedItem.productId;
-      const quantity = Number(requestedItem.quantity);
-
-      if (!productId || !mongoose.Types.ObjectId.isValid(productId) || !Number.isFinite(quantity) || quantity < 1) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Item at index ${i} requires a valid productId and a quantity of at least 1.`,
-        });
-      }
-
-      const product = await Product.findById(productId).session(session);
-      if (!product) {
-        await session.abortTransaction();
-        return res.status(404).json({ success: false, message: `Product not found: ${productId}` });
-      }
-
-      if (product.stock < quantity) {
-        await session.abortTransaction();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for "${product.nameEn}". Available: ${product.stock}, requested: ${quantity}.`,
-        });
-      }
-
-      product.stock -= quantity;
-      await product.save({ session });
-
-      const lineTotal = product.price * quantity;
-      subtotal += lineTotal;
-
-      let lineDiscount = 0;
-      if (affiliateProfile) {
-        lineDiscount = (product.productDiscount || 0) * quantity;
-        totalDiscount += lineDiscount;
-        totalAffiliateCommission += (product.affiliateCommission || 0) * quantity;
-      }
-
-      orderItems.push({
-        productId: product._id,
-        name: product.nameEn,
-        quantity,
-        price: product.price,
-        size: requestedItem.size || null,
-        color: requestedItem.color || null,
-      });
-      paymobItemLines.push({
-        name: product.nameEn,
-        amountCents: Math.round((lineTotal - lineDiscount) * 100),
-        quantity,
-      });
-    }
-
-    const totalOrderPrice = subtotal - totalDiscount;
+    const pricing = await priceAndReserveCart(items, session);
+    const affiliateDiscount = affiliateDiscountFor(pricing, affiliateProfile);
+    const shippingCost = pricing.paidSubtotal >= 6000 ? 0 : 100;
+    const totalDiscount = roundMoney(pricing.totalDiscount + affiliateDiscount);
+    const totalAffiliateCommission = affiliateCommissionFor(pricing, affiliateProfile);
+    const totalOrderPrice = roundMoney(Math.max(0, pricing.totalOrderPrice - affiliateDiscount) + shippingCost);
 
     if (totalOrderPrice <= 0) {
       await session.abortTransaction();
@@ -480,27 +555,23 @@ const initiatePaymobPayment = async (req, res) => {
 
     const amountCents = Math.round(totalOrderPrice * 100);
 
-    const itemsCentsSum = paymobItemLines.reduce((sum, line) => sum + line.amountCents, 0);
-    const remainder = amountCents - itemsCentsSum;
-    if (remainder !== 0 && paymobItemLines.length > 0) {
-      paymobItemLines[paymobItemLines.length - 1].amountCents += remainder;
-    }
-
-    const paymobItems = paymobItemLines.map((line) => ({
-      name: line.name,
-      amount_cents: Math.max(0, line.amountCents),
-      description: line.name,
-      quantity: line.quantity,
-    }));
+    // Paymob receives the authoritative server-calculated payable total as a
+    // single line so discounts and free units cannot introduce cent drift.
+    const paymobItems = [{ name: 'Toronto order', amount_cents: amountCents, description: 'Order total after promotions', quantity: 1 }];
 
     const order = await Order.create(
       [
         {
           customerId: req.user._id,
-          items: orderItems,
-          subtotal,
+          items: pricing.items,
+          subtotal: pricing.subtotal,
           affiliateId: affiliateUser ? affiliateUser._id : null,
           totalDiscount,
+          promotionDiscount: pricing.totalDiscount,
+          affiliateDiscount,
+          shippingCost,
+          promotionPricingVersion: 1,
+          appliedPromotions: pricing.appliedPromotions,
           totalAffiliateCommission,
           totalOrderPrice,
           status: 'Pending',
@@ -566,6 +637,8 @@ const initiatePaymobPayment = async (req, res) => {
         success: true,
         message: 'Payment initiated. Redirect the customer to the iframe URL.',
         orderId: createdOrder._id,
+        totalOrderPrice: createdOrder.totalOrderPrice,
+        appliedPromotions: createdOrder.appliedPromotions,
         iframeUrl,
       });
     } catch (paymobError) {
@@ -574,17 +647,13 @@ const initiatePaymobPayment = async (req, res) => {
         success: false,
         message: 'Order was created but Paymob payment initiation failed. Please retry payment.',
         orderId: createdOrder._id,
-        error: paymobError.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : paymobError.message,
       });
     }
   } catch (error) {
     await session.abortTransaction();
     console.error('[initiatePaymobPayment] failed before/around order creation:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while initiating Paymob payment.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   } finally {
     session.endSession();
   }
@@ -634,11 +703,45 @@ const paymobWebhook = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Order not found for this transaction.' });
     }
 
+    if (order.promotionPricingVersion === 1) {
+      // Recompute against the immutable order snapshot, never today's edited
+      // or deleted Promotion documents, then verify the signed payment total.
+      const snapshotProducts = new Map();
+      for (const item of order.items) {
+        snapshotProducts.set(String(item.productId), { _id: item.productId, nameEn: item.name, price: item.price, sizes: [], colors: [] });
+      }
+      const snapshotPromotions = (order.appliedPromotions || []).map((entry) => ({
+        ...(entry.toObject?.() || entry),
+        _id: entry.promotionId,
+        product: entry.productId,
+        isActive: true,
+        startsAt: new Date(0),
+        endsAt: null,
+      }));
+      const snapshotItems = order.items.map((item) => ({
+        productId: item.productId,
+        quantity: item.quantity,
+        size: item.size,
+        color: item.color,
+        freeSelections: item.freeItems || [],
+      }));
+      const recalculated = calculatePromotionPricing({ items: snapshotItems, products: snapshotProducts, promotions: snapshotPromotions });
+      if (Math.abs(recalculated.subtotal - order.subtotal) > 0.01
+        || Math.abs(recalculated.totalDiscount - order.promotionDiscount) > 0.01
+        || Math.abs(recalculated.totalOrderPrice - order.affiliateDiscount + order.shippingCost - order.totalOrderPrice) > 0.01) {
+        console.error(`[Paymob] promotion snapshot total mismatch for order ${order._id}`);
+        return res.status(409).json({ success: false, message: 'Order pricing snapshot could not be verified.' });
+      }
+    }
+
     if (order.paymentStatus === 'Paid') {
       return res.status(200).json({ success: true, message: 'Order already marked as Paid.' });
     }
 
     const isSuccessful = obj.success === true && obj.pending === false && !obj.error_occured;
+    if (isSuccessful && Number(obj.amount_cents) !== Math.round(Number(order.totalOrderPrice) * 100)) {
+      return res.status(400).json({ success: false, message: 'Payment amount does not match the order total.' });
+    }
 
     order.paymentStatus = isSuccessful ? 'Paid' : 'Failed';
     order.paymobTransactionId = String(obj.id);
@@ -646,17 +749,15 @@ const paymobWebhook = async (req, res) => {
 
     return res.status(200).json({ success: true });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while processing Paymob webhook.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
 module.exports = {
+  previewOrderPricing,
   createOrder,
   getMyOrders,
+  cancelMyOrder,
   getOrders,
   updateOrderStatus,
   initiatePaymobPayment,

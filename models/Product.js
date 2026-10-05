@@ -72,6 +72,13 @@ const productSchema = new mongoose.Schema(
       of: Number,
       default: {},
     },
+    // Optional per-size-and-color inventory. Keys use `${size}::${color}`;
+    // existing products continue to use stockBySize or aggregate stock.
+    stockByVariant: {
+      type: Map,
+      of: Number,
+      default: {},
+    },
     // Denormalized sum of stockBySize, kept in sync by the controller on
     // create/update. Exists purely so the dashboard's product table can show
     // a total without summing the map client-side on every render.

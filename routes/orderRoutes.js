@@ -2,7 +2,9 @@
 const express = require('express');
 const {
   createOrder,
+  previewOrderPricing,
   getMyOrders,
+  cancelMyOrder,
   getOrders,
   initiatePaymobPayment,
   paymobWebhook,
@@ -15,11 +17,14 @@ const router = express.Router();
 // @desc    Create a new order (Cash On Delivery / general checkout)
 // @access  Private (Customer only)
 router.post('/', protect, restrictTo('Customer', 'Affiliate', 'Admin', 'Manager'), createOrder);
+router.post('/preview', previewOrderPricing);
 
 // @route   GET /api/orders/my-orders
 // @desc    Get the currently authenticated user's own orders
 // @access  Private (any authenticated user)
 router.get('/my-orders', protect, getMyOrders);
+
+router.put('/:id/cancel', protect, restrictTo('Customer'), cancelMyOrder);
 
 // @route   GET /api/orders
 // @desc    Get all orders, optionally filtered by ?status=

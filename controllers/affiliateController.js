@@ -1,3 +1,4 @@
+const sendControllerError = require('../utils/controllerError');
 // backend/controllers/affiliateController.js
 const mongoose = require('mongoose');
 const AffiliateApplication = require('../models/AffiliateApplication');
@@ -92,11 +93,7 @@ const applyForAffiliate = async (req, res) => {
         message: 'This coupon code is already taken. Please choose another one.',
       });
     }
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while submitting affiliate application.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -116,11 +113,7 @@ const getAllApplications = async (req, res) => {
       applications,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching applications.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -217,11 +210,7 @@ const approveApplication = async (req, res) => {
         message: 'This coupon code is already taken. Please choose another one.',
       });
     }
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while approving application.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   } finally {
     session.endSession();
   }
@@ -242,11 +231,7 @@ const rejectApplication = async (req, res) => {
     await application.save();
     return res.status(200).json({ success: true, message: 'Application rejected.', application });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while rejecting application.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -316,11 +301,7 @@ const getAffiliateDashboard = async (req, res) => {
       monthlySales,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching affiliate dashboard.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -377,11 +358,7 @@ const getAffiliateLedger = async (req, res) => {
 
     return res.status(200).json({ success: true, ledger });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while fetching affiliate ledger.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -409,11 +386,7 @@ const confirmAffiliatePayout = async (req, res) => {
       profile,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while confirming payout.',
-      error: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 

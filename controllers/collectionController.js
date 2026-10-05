@@ -1,7 +1,26 @@
+const sendControllerError = require('../utils/controllerError');
 // collectionController.js
 const fs = require('fs');
 const path = require('path');
 const Collection = require('../models/Collection');
+const Product = require('../models/Product');
+
+const normalizeProducts = async (products) => {
+  const ids = [...new Set(products.map((id) => String(id)))];
+  const validIds = await Product.find({ _id: { $in: ids } }).distinct('_id');
+  if (validIds.length !== ids.length) {
+    const error = new Error('One or more selected products no longer exist.');
+    error.name = 'ValidationError';
+    error.publicMessage = error.message;
+    throw error;
+  }
+  return validIds;
+};
+
+const removeMissingPopulatedProducts = (collection) => {
+  collection.products = collection.products.filter(Boolean);
+  return collection;
+};
 
 // Parses a field that the frontend sent as a JSON string inside multipart
 // form-data. Falls back to the given default if the field is missing or isn't valid.
@@ -23,6 +42,7 @@ exports.getCollections = async (req, res) => {
     const collections = await Collection.find()
       .populate('products')
       .sort({ createdAt: -1 });
+    collections.forEach(removeMissingPopulatedProducts);
 
     res.status(200).json({
       status: 'success',
@@ -30,10 +50,7 @@ exports.getCollections = async (req, res) => {
       data: { collections },
     });
   } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -49,15 +66,14 @@ exports.getCollection = async (req, res) => {
       });
     }
 
+    removeMissingPopulatedProducts(collection);
+
     res.status(200).json({
       status: 'success',
       data: { collection },
     });
   } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -80,6 +96,7 @@ exports.createCollection = async (req, res) => {
     if (!Array.isArray(products)) {
       products = typeof products === 'string' ? [products] : [];
     }
+    products = await normalizeProducts(products);
 
     const imageUrl = `/uploads/${req.file.filename}`;
 
@@ -99,10 +116,7 @@ exports.createCollection = async (req, res) => {
     if (req.file) {
       fs.unlink(req.file.path, () => {});
     }
-    res.status(400).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -132,7 +146,7 @@ exports.updateCollection = async (req, res) => {
       if (!Array.isArray(products)) {
         products = typeof products === 'string' ? [products] : collection.products;
       }
-      collection.products = products;
+      collection.products = await normalizeProducts(products);
     }
 
     if (req.file) {
@@ -154,10 +168,7 @@ exports.updateCollection = async (req, res) => {
     if (req.file) {
       fs.unlink(req.file.path, () => {});
     }
-    res.status(400).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };
 
@@ -183,9 +194,6 @@ exports.deleteCollection = async (req, res) => {
       message: 'Collection deleted.',
     });
   } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      message: error.message,
-    });
+    return sendControllerError(res, error);
   }
 };

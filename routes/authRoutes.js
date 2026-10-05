@@ -2,8 +2,11 @@
 const express = require('express');
 const { register, login, getMe } = require('../controllers/authController');
 const { protect } = require('../middlewares/authMiddleware');
+const { authRateLimiter } = require('../middlewares/rateLimiters');
 
 const router = express.Router();
+
+router.use(['/login', '/register', '/forgot-password'], authRateLimiter);
 
 router.post('/register', register);
 router.post('/login', login);
