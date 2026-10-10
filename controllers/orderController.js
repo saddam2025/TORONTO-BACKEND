@@ -15,12 +15,19 @@ const PAYMOB_INTEGRATION_ID_CARD = process.env.PAYMOB_INTEGRATION_ID_CARD;
 const PAYMOB_IFRAME_ID = process.env.PAYMOB_IFRAME_ID;
 const PAYMOB_HMAC_SECRET = process.env.PAYMOB_HMAC_SECRET;
 const variantStockKey = (size, color) => `${size || '*'}::${String(color || '*').trim().toLowerCase()}`;
+const getShippingInfo = (details = {}) => ({
+  name: String(details.name || '').trim(),
+  phone: String(details.phone || '').trim(),
+  address: String(details.address || '').trim(),
+  city: String(details.city || '').trim(),
+});
 
 const reserveProductStock = (product, requestedItem, quantity) => {
   if (product.sizes.length && (!requestedItem.size || !product.sizes.includes(requestedItem.size))) {
     return `Please choose a valid size for "${product.nameEn}".`;
   }
-  if (product.colors.length && (!requestedItem.color || !product.colors.some((color) => String(color).toLowerCase() === String(requestedItem.color).toLowerCase()))) {
+  const colorName = (color) => typeof color === 'string' ? color : (color?.nameEn || color?.name || color?.nameAr || '');
+  if (product.colors.length && (!requestedItem.color || !product.colors.some((color) => colorName(color).trim().toLowerCase() === String(requestedItem.color).trim().toLowerCase()))) {
     return `Please choose a valid color for "${product.nameEn}".`;
   }
   if (product.stockByVariant instanceof Map && product.stockByVariant.size > 0) {
@@ -251,6 +258,12 @@ const createOrder = async (req, res) => {
     if (affiliateProfile && totalAffiliateCommission > 0) {
       affiliateProfile.pendingBalance += totalAffiliateCommission;
       await affiliateProfile.save({ session });
+    }
+
+    const shippingInfo = getShippingInfo(shippingDetails);
+    if (Object.values(shippingInfo).some(Boolean)) {
+      req.user.shippingInfo = shippingInfo;
+      await req.user.save({ session });
     }
 
     await session.commitTransaction();
@@ -593,6 +606,12 @@ const initiatePaymobPayment = async (req, res) => {
     if (affiliateProfile && totalAffiliateCommission > 0) {
       affiliateProfile.pendingBalance += totalAffiliateCommission;
       await affiliateProfile.save({ session });
+    }
+
+    const shippingInfo = getShippingInfo(shippingDetails);
+    if (Object.values(shippingInfo).some(Boolean)) {
+      req.user.shippingInfo = shippingInfo;
+      await req.user.save({ session });
     }
 
     await session.commitTransaction();

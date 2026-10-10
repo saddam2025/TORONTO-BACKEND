@@ -60,7 +60,8 @@ const productSchema = new mongoose.Schema(
       },
     },
     colors: {
-      type: [String],
+      // Accept legacy string names and the newer { name, nameEn, nameAr, hex } values.
+      type: [mongoose.Schema.Types.Mixed],
       default: [],
     },
     sizes: {

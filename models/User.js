@@ -38,6 +38,12 @@ const userSchema = new mongoose.Schema(
       default: 'active',
       required: true,
     },
+    shippingInfo: {
+      name: { type: String, trim: true, default: null },
+      phone: { type: String, trim: true, default: null },
+      address: { type: String, trim: true, default: null },
+      city: { type: String, trim: true, default: null },
+    },
   },
   {
     timestamps: { createdAt: true, updatedAt: true },

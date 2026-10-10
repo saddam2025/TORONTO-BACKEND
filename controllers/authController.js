@@ -168,6 +168,12 @@ const getMe = async (req, res) => {
         email: user.email,
         role: user.role,
         status: user.status,
+        shippingInfo: user.shippingInfo ? {
+          name: user.shippingInfo.name,
+          phone: user.shippingInfo.phone,
+          address: user.shippingInfo.address,
+          city: user.shippingInfo.city,
+        } : null,
       },
     });
   } catch (error) {
